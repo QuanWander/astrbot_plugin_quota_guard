@@ -1,0 +1,19 @@
+name: astrbot_plugin_quota_guard
+display_name: Token 额度管家
+short_desc: 按群按人限制 token 用量，支持限时 VIP 豁免
+desc: >-
+  独立实现的群聊 token 流量控制：按群、按人统计每日用量，超额在请求前拦截。
+  支持限时 VIP —— 指定群里指定成员在一段时间内不受单用户限额约束，到期自动恢复。
+  用量取自模型返回的真实 token 数，不依赖任何其他插件。
+version: 1.0.0
+author: 大肥鱼
+repo: https://github.com/QuanWander/astrbot_plugin_quota_guard
+astrbot_version: ">=4.20.0"
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - qq_official_webhook
+tags:
+  - token
+  - 限额
+  - 管理
