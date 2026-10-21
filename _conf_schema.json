@@ -57,8 +57,14 @@
   "user_limit_scope": {
     "description": "个人限额的计算范围",
     "type": "string",
-    "options": "group global",
-    "labels": "按群（每个群独立额度） 全局（跨群合并额度）",
+    "options": [
+      "group",
+      "global"
+    ],
+    "labels": [
+      "按群（每个群独立额度）",
+      "全局（跨群合并额度）"
+    ],
     "default": "global",
     "hint": "global：同一个 QQ 在所有群里加起来算一份额度；group：每个群各有一份。"
   }
