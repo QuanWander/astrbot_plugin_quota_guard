@@ -203,7 +203,7 @@ class VipStore:
     "astrbot_plugin_quota_guard",
     "大肥鱼",
     "群聊 token 额度控制 + 限时 VIP",
-    "1.0.1",
+    "1.0.2",
 )
 class TokenGuard(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
