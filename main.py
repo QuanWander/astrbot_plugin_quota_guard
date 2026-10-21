@@ -200,7 +200,7 @@ class VipStore:
 
 
 @register(
-    "astrbot_plugin_quota_guard",
+    "1.0.3",
     "大肥鱼",
     "群聊 token 额度控制 + 限时 VIP",
     "1.0.2",
