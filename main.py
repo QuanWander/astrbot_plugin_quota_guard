@@ -331,9 +331,15 @@ class TokenGuard(Star):
             lines.append(
                 f"本群：{_human(self.usage.group_total(group_id))} / {_human(gl)}"
             )
-        lines.append(
-            f"你：{_human(self.usage.user_total(group_id, user_id))} / {_human(ul)}"
-        )
+        # 显示口径必须和拦截口径一致，否则会出现「A 群满了、B 群显示 0」的误导
+        scope = str(self._cfg("user_limit_scope", "group")).lower()
+        if scope == "global" or not group_id:
+            user_used = self.usage.user_global_total(user_id)
+            user_label = "你（全局）"
+        else:
+            user_used = self.usage.user_total(group_id, user_id)
+            user_label = "你（本群）"
+        lines.append(f"{user_label}：{_human(user_used)} / {_human(ul)}")
         if group_id and user_id:
             left = self.vip.remaining(group_id, user_id)
             if left > 0:
