@@ -2,6 +2,14 @@
 
 > 本插件原拟名 `token_guard`，因市场已有同名插件，正式定名 `quota_guard`（Token 额度管家）。
 
+## 1.0.3 - 2026-10-21
+
+修复配置面板中「个人限额的计算范围」显示异常的问题。
+
+`_conf_schema.json` 里 `options` / `labels` 误写成了空格分隔的字符串，
+部分版本的 WebUI 会把它当成字符序列逐字渲染，出现 g、r、o、u、p 这种选项。
+现改为数组格式，与 AstrBot 官方 schema 保持一致。
+
 ## 1.0.2 - 2026-10-21
 
 - 同步 `@register` 装饰器与 `metadata.yaml` 的版本号（此前装饰器仍为 1.0.0）；
