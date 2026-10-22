@@ -73,5 +73,11 @@
     "type": "bool",
     "hint": "开启后，本群当天额度用尽时，戳一戳不再触发表情/回戳等反应，避免看起来还在回应。",
     "default": true
+  },
+  "cached_token_weight": {
+    "description": "缓存 token 计入额度的权重",
+    "type": "float",
+    "hint": "缓存命中 token 的实际单价约为未命中的 1/50。设 1.0 表示按原值全算（额度掉得快）；设 0.02 更贴近真实成本。",
+    "default": 0.02
   }
 }

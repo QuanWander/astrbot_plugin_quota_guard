@@ -205,7 +205,7 @@ class VipStore:
     "1.0.3",
     "大肥鱼",
     "群聊 token 额度控制 + 限时 VIP",
-    "1.0.6",
+    "1.0.7",
 )
 class TokenGuard(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -384,11 +384,17 @@ class TokenGuard(Star):
         if usage is None:
             return
         try:
-            tokens = int(getattr(usage, "total", 0))
+            in_other = int(getattr(usage, "input_other", 0) or 0)
+            in_cached = int(getattr(usage, "input_cached", 0) or 0)
+            out = int(getattr(usage, "output", 0) or 0)
+            try:
+                weight = float(self._cfg("cached_token_weight", 1.0))
+            except (TypeError, ValueError):
+                weight = 1.0
+            # 缓存 token 的实际单价远低于未命中，按权重折算后再计入额度
+            tokens = in_other + int(in_cached * max(0.0, weight)) + out
             if not tokens:
-                tokens = int(getattr(usage, "input_other", 0)) + int(
-                    getattr(usage, "input_cached", 0)
-                ) + int(getattr(usage, "output", 0))
+                tokens = int(getattr(usage, "total", 0) or 0)
         except (TypeError, ValueError):
             return
         group_id = str(event.get_group_id() or "")
