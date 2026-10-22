@@ -12,11 +12,13 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import Poke
 from astrbot.api.star import Context, Star, register
 
 PLUGIN_NAME = "astrbot_plugin_quota_guard"
@@ -203,7 +205,7 @@ class VipStore:
     "1.0.3",
     "大肥鱼",
     "群聊 token 额度控制 + 限时 VIP",
-    "1.0.5",
+    "1.0.6",
 )
 class TokenGuard(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -213,6 +215,7 @@ class TokenGuard(Star):
         self.usage = UsageStore(base / "usage.json")
         self.vip = VipStore(base / "vip.json")
         self.usage._load()
+        self._poke_patched = False
 
     # ------------------------------------------------------------------ 配置
     def _cfg(self, key: str, default):
@@ -251,6 +254,83 @@ class TokenGuard(Star):
         if isinstance(raw, str):
             raw = [x.strip() for x in raw.replace("，", ",").split(",")]
         return str(user_id) in {str(x).strip() for x in raw if str(x).strip()}
+
+    # ------------------------------------------------------------------ 超额判断
+    def is_group_over_limit(self, group_id: str) -> bool:
+        """本群今日用量是否已达上限。"""
+        if not self._cfg("enable", True):
+            return False
+        gid = str(group_id or "")
+        if not gid or not self._is_enforced_group(gid):
+            return False
+        self.usage.ensure_day(self._reset_hour())
+        return self.usage.group_total(gid) >= self._group_limit()
+
+    @staticmethod
+    def _has_poke(event: AstrMessageEvent) -> bool:
+        try:
+            for comp in event.get_messages() or []:
+                if isinstance(comp, Poke):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def should_mute_poke(self, event: AstrMessageEvent) -> bool:
+        """群额度用完后，是否该吞掉这次戳一戳（避免继续做表情回应）。"""
+        if not self._cfg("mute_poke_over_limit", True):
+            return False
+        gid = str(event.get_group_id() or "")
+        uid = str(event.get_sender_id() or "")
+        if not gid:
+            return False
+        if uid and self._is_exempt_user(uid):
+            return False
+        if not self.is_group_over_limit(gid):
+            return False
+        return self._has_poke(event)
+
+    def try_patch_pokepro(self) -> bool:
+        """把 pokepro 的消息处理包一层：群超限时吞掉戳一戳。"""
+        if self._poke_patched:
+            return True
+        module = None
+        for name, mod in list(sys.modules.items()):
+            if name.endswith("astrbot_plugin_pokepro.main"):
+                module = mod
+                break
+        if module is None:
+            return False
+        cls = getattr(module, "PokeproPlugin", None)
+        original = getattr(cls, "on_message", None)
+        if cls is None or original is None:
+            return False
+
+        guard = self
+
+        async def _patched(inner_self, event):
+            try:
+                if guard.should_mute_poke(event):
+                    logger.info("[quota_guard] 群额度已满，跳过戳一戳反应")
+                    return None
+            except Exception as exc:
+                logger.debug(f"[quota_guard] 戳一戳判断异常: {exc}")
+            return await original(inner_self, event)
+
+        cls.on_message = _patched
+        self._poke_patched = True
+        logger.info("[quota_guard] 已接管 pokepro 的戳一戳处理")
+        return True
+
+    @filter.on_astrbot_loaded()
+    async def on_loaded(self):
+        if not self.try_patch_pokepro():
+            logger.warning("[quota_guard] 未找到 pokepro，戳一戳静音功能不可用（不影响限额）")
+
+    @filter.on_llm_request()
+    async def ensure_patched(self, event: AstrMessageEvent, req):
+        if not self._poke_patched:
+            self.try_patch_pokepro()
 
     # ------------------------------------------------------------------ 拦截
     @filter.on_waiting_llm_request()
