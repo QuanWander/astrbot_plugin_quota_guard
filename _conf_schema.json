@@ -68,12 +68,6 @@
     "default": "global",
     "hint": "global：同一个 QQ 在所有群里加起来算一份额度；group：每个群各有一份。"
   },
-  "mute_poke_over_limit": {
-    "description": "群额度满后停掉戳一戳反应",
-    "type": "bool",
-    "hint": "开启后，本群当天额度用尽时，戳一戳不再触发表情/回戳等反应，避免看起来还在回应。",
-    "default": true
-  },
   "cached_token_weight": {
     "description": "缓存 token 计入额度的权重",
     "type": "float",
