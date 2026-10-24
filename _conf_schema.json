@@ -103,18 +103,39 @@
     "default": "本群今天的额度已用 {percent}%（{used} / {limit}），到顶后就不再回复了。"
   },
   "price_in": {
-    "description": "未命中输入单价（元/百万）",
+    "description": "未命中输入单价（元/百万，空闲时段）",
     "type": "float",
+    "hint": "DeepSeek 现价：空闲 1 元，高峰自动乘下面的系数。",
     "default": 1.0
   },
   "price_cached": {
-    "description": "缓存输入单价（元/百万）",
+    "description": "缓存输入单价（元/百万，空闲时段）",
     "type": "float",
+    "hint": "DeepSeek 现价：空闲 0.02 元。",
     "default": 0.02
   },
   "price_out": {
-    "description": "输出单价（元/百万）",
+    "description": "输出单价（元/百万，空闲时段）",
     "type": "float",
-    "default": 8.0
+    "hint": "DeepSeek 现价：空闲 4 元，高峰 8 元。",
+    "default": 4.0
+  },
+  "price_peak_factor": {
+    "description": "高峰时段的价格倍数",
+    "type": "float",
+    "hint": "高峰价 = 空闲价 × 该系数。DeepSeek 现在是 ×2；改成 1 就是不分峰谷。",
+    "default": 2.0
+  },
+  "peak_windows": {
+    "description": "高峰时段（北京时间）",
+    "type": "string",
+    "hint": "逗号分隔，格式 HH:MM-HH:MM，只在周一至周五生效。默认 09:00-12:00,14:00-18:00。",
+    "default": "09:00-12:00,14:00-18:00"
+  },
+  "holiday_dates": {
+    "description": "法定节假日（全天按空闲价）",
+    "type": "list",
+    "hint": "填 YYYY-MM-DD；周末本来就按空闲价，这里只补工作日里的节假日。",
+    "default": []
   }
 }

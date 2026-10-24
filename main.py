@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
@@ -23,6 +24,79 @@ from astrbot.api.star import Context, Star, register
 PLUGIN_NAME = "astrbot_plugin_quota_guard"
 DEFAULT_BLOCK_MESSAGE = "今天的额度用完了，明天再来吧。"
 DEFAULT_WARN_MESSAGE = "本群今天的额度已用 {percent}%（{used} / {limit}），到顶后就不再回复了。"
+
+# DeepSeek 的峰谷计费固定按北京时间，不跟随服务器时区；中国无夏令时，用 +08:00 即可。
+CN_TZ = timezone(timedelta(hours=8))
+DEFAULT_PEAK_WINDOWS = "09:00-12:00,14:00-18:00"
+
+
+def _parse_windows(raw) -> list[tuple[int, int]]:
+    """把 "09:00-12:00,14:00-18:00" 解析成 [(540, 720), ...] 的分钟区间。"""
+    if isinstance(raw, (list, tuple)):
+        parts = [str(x) for x in raw]
+    else:
+        parts = str(raw or "").replace("，", ",").split(",")
+    windows: list[tuple[int, int]] = []
+    for part in parts:
+        part = part.strip()
+        if not part or "-" not in part:
+            continue
+        left, _, right = part.partition("-")
+        try:
+            sh, sm = (int(x) for x in left.strip().split(":"))
+            eh, em = (int(x) for x in right.strip().split(":"))
+        except ValueError:
+            continue
+        start, end = sh * 60 + sm, eh * 60 + em
+        if 0 <= start < end <= 24 * 60:
+            windows.append((start, end))
+    return windows
+
+
+def _parse_dates(raw) -> set[str]:
+    """节假日列表，支持 list 或逗号/空格分隔的字符串，只认 YYYY-MM-DD。"""
+    if isinstance(raw, (list, tuple)):
+        items = [str(x) for x in raw]
+    else:
+        items = str(raw or "").replace("，", ",").replace(" ", ",").split(",")
+    return {x.strip() for x in items if len(x.strip()) == 10 and x.strip()[4] == "-"}
+
+
+def _is_peak(ts: float, windows: list[tuple[int, int]], holidays: set[str]) -> bool:
+    """是否高峰：周一至周五、非节假日、落在任一高峰区间内。"""
+    if not windows:
+        return False
+    dt = datetime.fromtimestamp(ts, CN_TZ)
+    if dt.weekday() >= 5:
+        return False
+    if dt.strftime("%Y-%m-%d") in holidays:
+        return False
+    minutes = dt.hour * 60 + dt.minute
+    return any(start <= minutes < end for start, end in windows)
+
+
+def _next_switch(
+    ts: float, windows: list[tuple[int, int]], holidays: set[str]
+) -> datetime | None:
+    """下一次峰谷切换的时刻（找不到就返回 None）。"""
+    now = datetime.fromtimestamp(ts, CN_TZ)
+    current = _is_peak(ts, windows, holidays)
+    for day in range(0, 9):
+        base = now + timedelta(days=day)
+        for start, end in windows:
+            for minutes in (start, end):
+                cand = base.replace(
+                    hour=minutes // 60, minute=minutes % 60, second=0, microsecond=0
+                )
+                if cand <= now:
+                    continue
+                if _is_peak(cand.timestamp(), windows, holidays) != current:
+                    return cand
+    return None
+
+
+def _fmt_money(value: float) -> str:
+    return f"{value:.2f}" if value >= 0.01 else f"{value:.4f}"
 
 
 def _logical_day(reset_hour: int) -> str:
@@ -72,6 +146,7 @@ class UsageStore:
                         "i": int(v.get("i", 0) or 0),
                         "c": int(v.get("c", 0) or 0),
                         "o": int(v.get("o", 0) or 0),
+                        "cost": float(v.get("cost", 0) or 0),
                     }
         except FileNotFoundError:
             pass
@@ -116,6 +191,7 @@ class UsageStore:
         in_other: int = 0,
         in_cached: int = 0,
         out: int = 0,
+        cost: float = 0.0,
     ) -> None:
         if tokens <= 0:
             return
@@ -130,10 +206,12 @@ class UsageStore:
             self.users[gkey] = self.users.get(gkey, 0) + tokens
 
         def bump(key: str) -> None:
-            row = self.detail.setdefault(key, {"i": 0, "c": 0, "o": 0})
+            row = self.detail.setdefault(key, {"i": 0, "c": 0, "o": 0, "cost": 0.0})
             row["i"] += max(0, int(in_other))
             row["c"] += max(0, int(in_cached))
             row["o"] += max(0, int(out))
+            # 成本在记账时就按当时的峰谷价算好，跨时段累加不会失真
+            row["cost"] = float(row.get("cost", 0.0) or 0.0) + max(0.0, float(cost))
 
         if group_id:
             bump(f"g:{group_id}")
@@ -154,13 +232,15 @@ class UsageStore:
         return self.users.get(f"*:{user_id}", 0)
 
     def group_detail(self, group_id: str) -> dict[str, int]:
-        return self.detail.get(f"g:{group_id}", {"i": 0, "c": 0, "o": 0})
+        return self.detail.get(f"g:{group_id}", {"i": 0, "c": 0, "o": 0, "cost": 0.0})
 
     def user_detail(self, group_id: str, user_id: str) -> dict[str, int]:
-        return self.detail.get(f"u:{group_id}:{user_id}", {"i": 0, "c": 0, "o": 0})
+        return self.detail.get(
+            f"u:{group_id}:{user_id}", {"i": 0, "c": 0, "o": 0, "cost": 0.0}
+        )
 
     def user_global_detail(self, user_id: str) -> dict[str, int]:
-        return self.detail.get(f"u:*:{user_id}", {"i": 0, "c": 0, "o": 0})
+        return self.detail.get(f"u:*:{user_id}", {"i": 0, "c": 0, "o": 0, "cost": 0.0})
 
 
 class VipStore:
@@ -248,7 +328,7 @@ class VipStore:
     "1.0.3",
     "大肥鱼",
     "群聊 token 额度控制 + 限时 VIP",
-    "1.1.1",
+    "1.2.0",
 )
 class TokenGuard(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -340,15 +420,71 @@ class TokenGuard(Star):
         except (TypeError, ValueError):
             return default
 
+    def _peak_windows(self) -> list[tuple[int, int]]:
+        windows = _parse_windows(self._cfg("peak_windows", DEFAULT_PEAK_WINDOWS))
+        return windows
+
+    def _holidays(self) -> set[str]:
+        return _parse_dates(self._cfg("holiday_dates", []))
+
+    def _peak_factor(self) -> float:
+        try:
+            return max(1.0, float(self._cfg("price_peak_factor", 2.0)))
+        except (TypeError, ValueError):
+            return 2.0
+
+    def is_peak(self, ts: float | None = None) -> bool:
+        """当前是否处于高峰时段（北京时间，工作日、非节假日）。"""
+        moment = time.time() if ts is None else ts
+        return _is_peak(moment, self._peak_windows(), self._holidays())
+
+    def _cost_now(self, i: int, c: int, o: int, ts: float | None = None) -> float:
+        """按调用时刻的峰谷价算这一笔的钱。"""
+        base = (
+            (i / 1_000_000) * self._price("price_in", 1.0)
+            + (c / 1_000_000) * self._price("price_cached", 0.02)
+            + (o / 1_000_000) * self._price("price_out", 4.0)
+        )
+        factor = self._peak_factor() if self.is_peak(ts) else 1.0
+        return base * factor
+
     def _cost(self, detail: dict) -> float:
+        """已记账的成本；旧数据没有 cost 字段时按空闲价重算。"""
+        stored = detail.get("cost")
+        if stored is not None:
+            return float(stored)
         i = int(detail.get("i", 0) or 0)
         c = int(detail.get("c", 0) or 0)
         o = int(detail.get("o", 0) or 0)
         return (
             (i / 1_000_000) * self._price("price_in", 1.0)
             + (c / 1_000_000) * self._price("price_cached", 0.02)
-            + (o / 1_000_000) * self._price("price_out", 8.0)
+            + (o / 1_000_000) * self._price("price_out", 4.0)
         )
+
+    def _period_line(self) -> str:
+        """给 /token 用的一行：现在是什么时段、单价多少、何时切换。"""
+        now = time.time()
+        peak = self.is_peak(now)
+        factor = self._peak_factor() if peak else 1.0
+        in_price = self._price("price_in", 1.0) * factor
+        cached_price = self._price("price_cached", 0.02) * factor
+        out_price = self._price("price_out", 4.0) * factor
+        head = "高峰 ×%g" % factor if peak else "空闲"
+        text = (
+            f"计费时段：{head}（输入 {in_price:g} / 缓存 {cached_price:g} / "
+            f"输出 {out_price:g} 元每百万）"
+        )
+        switch = _next_switch(now, self._peak_windows(), self._holidays())
+        if switch is not None:
+            today = datetime.fromtimestamp(now, CN_TZ).date()
+            when = (
+                switch.strftime("%H:%M")
+                if switch.date() == today
+                else switch.strftime("%m-%d %H:%M")
+            )
+            text += f"，{when} 转{'空闲' if peak else '高峰'}"
+        return text
 
     async def _maybe_warn(self, event: AstrMessageEvent, group_id: str) -> None:
         if not group_id:
@@ -471,6 +607,7 @@ class TokenGuard(Star):
             in_other=in_other,
             in_cached=in_cached,
             out=out,
+            cost=self._cost_now(in_other, in_cached, out),
         )
 
     # ------------------------------------------------------------------ 指令
@@ -503,15 +640,16 @@ class TokenGuard(Star):
         # 成本估算：按配置单价把输入/缓存/输出分别折算
         cost_parts = []
         if group_id:
-            cost_parts.append(f"本群 ¥{self._cost(self.usage.group_detail(group_id)):.2f}")
+            cost_parts.append(f"本群 ¥{_fmt_money(self._cost(self.usage.group_detail(group_id)))}")
         if user_id:
             if scope == "global" or not group_id:
                 ud = self.usage.user_global_detail(user_id)
             else:
                 ud = self.usage.user_detail(group_id, user_id)
-            cost_parts.append(f"你 ¥{self._cost(ud):.2f}")
+            cost_parts.append(f"你 ¥{_fmt_money(self._cost(ud))}")
         if cost_parts:
             lines.append("折合（估算）：" + " / ".join(cost_parts))
+            lines.append(self._period_line())
         yield event.plain_result("\n".join(lines))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
