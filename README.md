@@ -95,3 +95,16 @@ git clone https://github.com/QuanWander/astrbot_plugin_quota_guard
 ## License
 
 MIT
+
+## 1.1 新增配置
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `over_limit_action` | string | 超额后：`silent` 静默 / `notify_once` 每天提示一次（默认）/ `notify` 每次都提示 |
+| `warn_ratio` | float | 用量预警阈值，默认 0.8，填 0 关闭 |
+| `warn_message` | text | 预警文案，可用 `{percent}` `{used}` `{limit}` |
+| `price_in` | float | 未命中输入单价（元/百万），默认 1.0 |
+| `price_cached` | float | 缓存输入单价（元/百万），默认 0.02 |
+| `price_out` | float | 输出单价（元/百万），默认 8.0 |
+
+`/token` 末尾会显示「折合（估算）」，按上面的单价把输入、缓存、输出分别折算。

@@ -79,5 +79,48 @@
     "type": "float",
     "hint": "缓存命中 token 的实际单价约为未命中的 1/50。设 1.0 表示按原值全算（额度掉得快）；设 0.02 更贴近真实成本。",
     "default": 0.02
+  },
+  "over_limit_action": {
+    "description": "超额后的行为",
+    "type": "string",
+    "options": [
+      "silent",
+      "notify_once",
+      "notify"
+    ],
+    "labels": [
+      "静默（不回复也不提示）",
+      "每天提示一次",
+      "每次拦截都提示"
+    ],
+    "default": "notify_once",
+    "hint": "主人和 VIP 不受影响，他们始终能收到回复。"
+  },
+  "warn_ratio": {
+    "description": "用量预警阈值",
+    "type": "float",
+    "hint": "本群用量达到限额的这个比例时提醒一次，填 0 关闭。默认 0.8。",
+    "default": 0.8
+  },
+  "warn_message": {
+    "description": "预警文案",
+    "type": "text",
+    "hint": "可用 {percent} {used} {limit}。",
+    "default": "本群今天的额度已用 {percent}%（{used} / {limit}），到顶后就不再回复了。"
+  },
+  "price_in": {
+    "description": "未命中输入单价（元/百万）",
+    "type": "float",
+    "default": 1.0
+  },
+  "price_cached": {
+    "description": "缓存输入单价（元/百万）",
+    "type": "float",
+    "default": 0.02
+  },
+  "price_out": {
+    "description": "输出单价（元/百万）",
+    "type": "float",
+    "default": 8.0
   }
 }

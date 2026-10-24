@@ -23,6 +23,7 @@ from astrbot.api.star import Context, Star, register
 
 PLUGIN_NAME = "astrbot_plugin_quota_guard"
 DEFAULT_BLOCK_MESSAGE = "今天的额度用完了，明天再来吧。"
+DEFAULT_WARN_MESSAGE = "本群今天的额度已用 {percent}%（{used} / {limit}），到顶后就不再回复了。"
 
 
 def _logical_day(reset_hour: int) -> str:
@@ -47,13 +48,14 @@ def _human(n: int) -> str:
 
 
 class UsageStore:
-    """按逻辑日期保存的用量计数。"""
+    """按逻辑日期保存的用量计数，附带输入/缓存/输出明细（用于成本估算）。"""
 
     def __init__(self, path: Path):
         self.path = path
         self.day = ""
         self.groups: dict[str, int] = {}
         self.users: dict[str, int] = {}
+        self.detail: dict[str, dict[str, int]] = {}
 
     def _load(self) -> None:
         try:
@@ -65,6 +67,13 @@ class UsageStore:
                 for k, v in (data.get("users") or {}).items()
                 if str(k).split(":")[-1].isdigit()
             }
+            for k, v in (data.get("detail") or {}).items():
+                if isinstance(v, dict):
+                    self.detail[str(k)] = {
+                        "i": int(v.get("i", 0) or 0),
+                        "c": int(v.get("c", 0) or 0),
+                        "o": int(v.get("o", 0) or 0),
+                    }
         except FileNotFoundError:
             pass
         except Exception as exc:
@@ -75,7 +84,12 @@ class UsageStore:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.write_text(
                 json.dumps(
-                    {"day": self.day, "groups": self.groups, "users": self.users},
+                    {
+                        "day": self.day,
+                        "groups": self.groups,
+                        "users": self.users,
+                        "detail": self.detail,
+                    },
                     ensure_ascii=False,
                 ),
                 encoding="utf-8",
@@ -91,22 +105,43 @@ class UsageStore:
             self.day = today
             self.groups = {}
             self.users = {}
+            self.detail = {}
             self._save()
 
-    def add(self, group_id: str, user_id: str, tokens: int, reset_hour: int) -> None:
+    def add(
+        self,
+        group_id: str,
+        user_id: str,
+        tokens: int,
+        reset_hour: int,
+        in_other: int = 0,
+        in_cached: int = 0,
+        out: int = 0,
+    ) -> None:
         if tokens <= 0:
             return
         self.ensure_day(reset_hour)
         if group_id:
             self.groups[group_id] = self.groups.get(group_id, 0) + tokens
         if user_id and user_id.isdigit():
-            # 群内计数（按群限额用）
             if group_id:
                 key = f"{group_id}:{user_id}"
                 self.users[key] = self.users.get(key, 0) + tokens
-            # 全局计数（按人限额用，跨群 + 私聊累加）
             gkey = f"*:{user_id}"
             self.users[gkey] = self.users.get(gkey, 0) + tokens
+
+        def bump(key: str) -> None:
+            row = self.detail.setdefault(key, {"i": 0, "c": 0, "o": 0})
+            row["i"] += max(0, int(in_other))
+            row["c"] += max(0, int(in_cached))
+            row["o"] += max(0, int(out))
+
+        if group_id:
+            bump(f"g:{group_id}")
+        if user_id and user_id.isdigit():
+            if group_id:
+                bump(f"u:{group_id}:{user_id}")
+            bump(f"u:*:{user_id}")
         self._save()
 
     def group_total(self, group_id: str) -> int:
@@ -118,6 +153,15 @@ class UsageStore:
     def user_global_total(self, user_id: str) -> int:
         """该 QQ 在当天所有群 + 私聊的 token 总和。"""
         return self.users.get(f"*:{user_id}", 0)
+
+    def group_detail(self, group_id: str) -> dict[str, int]:
+        return self.detail.get(f"g:{group_id}", {"i": 0, "c": 0, "o": 0})
+
+    def user_detail(self, group_id: str, user_id: str) -> dict[str, int]:
+        return self.detail.get(f"u:{group_id}:{user_id}", {"i": 0, "c": 0, "o": 0})
+
+    def user_global_detail(self, user_id: str) -> dict[str, int]:
+        return self.detail.get(f"u:*:{user_id}", {"i": 0, "c": 0, "o": 0})
 
 
 class VipStore:
@@ -205,7 +249,7 @@ class VipStore:
     "1.0.3",
     "大肥鱼",
     "群聊 token 额度控制 + 限时 VIP",
-    "1.0.7",
+    "1.1.0",
 )
 class TokenGuard(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -215,6 +259,8 @@ class TokenGuard(Star):
         self.usage = UsageStore(base / "usage.json")
         self.vip = VipStore(base / "vip.json")
         self.usage._load()
+        self._notice_path = base / "notices.json"
+        self._notices = self._load_notices()
         self._poke_patched = False
 
     # ------------------------------------------------------------------ 配置
@@ -254,6 +300,81 @@ class TokenGuard(Star):
         if isinstance(raw, str):
             raw = [x.strip() for x in raw.replace("，", ",").split(",")]
         return str(user_id) in {str(x).strip() for x in raw if str(x).strip()}
+
+    # ------------------------------------------------------------------ 提示状态
+    def _load_notices(self) -> dict:
+        today = _logical_day(self._reset_hour())
+        try:
+            data = json.loads(self._notice_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or data.get("day") != today:
+                raise ValueError("stale")
+            data.setdefault("block", [])
+            data.setdefault("warn", [])
+            return data
+        except Exception:
+            return {"day": today, "block": [], "warn": []}
+
+    def _save_notices(self) -> None:
+        try:
+            self._notice_path.parent.mkdir(parents=True, exist_ok=True)
+            self._notice_path.write_text(
+                json.dumps(self._notices, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception as exc:
+            logger.debug(f"[quota_guard] 保存提示状态失败: {exc}")
+
+    def _mark_notice(self, kind: str, key: str) -> bool:
+        """当天第一次返回 True，之后返回 False。"""
+        today = _logical_day(self._reset_hour())
+        if self._notices.get("day") != today:
+            self._notices = {"day": today, "block": [], "warn": []}
+        bucket = self._notices.setdefault(kind, [])
+        if key in bucket:
+            return False
+        bucket.append(key)
+        self._save_notices()
+        return True
+
+    # ------------------------------------------------------------------ 成本估算
+    def _price(self, key: str, default: float) -> float:
+        try:
+            return float(self._cfg(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _cost(self, detail: dict) -> float:
+        i = int(detail.get("i", 0) or 0)
+        c = int(detail.get("c", 0) or 0)
+        o = int(detail.get("o", 0) or 0)
+        return (
+            (i / 1_000_000) * self._price("price_in", 1.0)
+            + (c / 1_000_000) * self._price("price_cached", 0.02)
+            + (o / 1_000_000) * self._price("price_out", 8.0)
+        )
+
+    async def _maybe_warn(self, event: AstrMessageEvent, group_id: str) -> None:
+        if not group_id:
+            return
+        try:
+            ratio = float(self._cfg("warn_ratio", 0.8))
+        except (TypeError, ValueError):
+            ratio = 0.8
+        if ratio <= 0:
+            return
+        limit = self._group_limit()
+        total = self.usage.group_total(group_id)
+        if limit <= 0 or total < limit * ratio:
+            return
+        if not self._mark_notice("warn", group_id):
+            return
+        try:
+            text = str(self._cfg("warn_message", DEFAULT_WARN_MESSAGE)).format(
+                percent=int(total * 100 / limit), used=_human(total), limit=_human(limit)
+            )
+            await event.send(event.plain_result(text).chain)
+            logger.info(f"[quota_guard] 群 {group_id} 用量 {total}/{limit}，已发预警")
+        except Exception as exc:
+            logger.debug(f"[quota_guard] 发送预警失败: {exc}")
 
     # ------------------------------------------------------------------ 超额判断
     def is_group_over_limit(self, group_id: str) -> bool:
@@ -361,6 +482,7 @@ class TokenGuard(Star):
         elif group_id and self.usage.group_total(group_id) >= self._group_limit():
             reason = "group"
         if not reason:
+            await self._maybe_warn(event, group_id)
             return
 
         event.stop_event()
@@ -368,12 +490,19 @@ class TokenGuard(Star):
             f"[quota_guard] 拦截 reason={reason} group={group_id} user={user_id} "
             f"群用量={self.usage.group_total(group_id)} 个人用量={user_used} scope={scope}"
         )
-        if self._cfg("notify_blocked", True):
-            try:
-                text = str(self._cfg("block_message", DEFAULT_BLOCK_MESSAGE))
-                await event.send(event.plain_result(text).chain)
-            except Exception as exc:
-                logger.debug(f"[quota_guard] 发送提示失败: {exc}")
+
+        action = str(self._cfg("over_limit_action", "notify_once")).lower()
+        if action not in ("silent", "notify", "notify_once"):
+            action = "notify" if self._cfg("notify_blocked", True) else "silent"
+        if action == "silent":
+            return
+        if action == "notify_once" and not self._mark_notice("block", group_id or user_id):
+            return
+        try:
+            text = str(self._cfg("block_message", DEFAULT_BLOCK_MESSAGE))
+            await event.send(event.plain_result(text).chain)
+        except Exception as exc:
+            logger.debug(f"[quota_guard] 发送提示失败: {exc}")
 
     # ------------------------------------------------------------------ 记账
     @filter.on_llm_response()
@@ -402,7 +531,15 @@ class TokenGuard(Star):
         # 私聊默认既不拦截也不计数，避免私聊消耗影响群额度
         if not group_id and not self._cfg("apply_private", False):
             return
-        self.usage.add(group_id, user_id, tokens, self._reset_hour())
+        self.usage.add(
+            group_id,
+            user_id,
+            tokens,
+            self._reset_hour(),
+            in_other=in_other,
+            in_cached=in_cached,
+            out=out,
+        )
 
     # ------------------------------------------------------------------ 指令
     @filter.command("token")
@@ -430,6 +567,19 @@ class TokenGuard(Star):
             left = self.vip.remaining(group_id, user_id)
             if left > 0:
                 lines.append(f"VIP：剩余 {left / 3600:.1f} 小时（{_fmt_ts(time.time() + left)} 到期）")
+
+        # 成本估算：按配置单价把输入/缓存/输出分别折算
+        cost_parts = []
+        if group_id:
+            cost_parts.append(f"本群 ¥{self._cost(self.usage.group_detail(group_id)):.2f}")
+        if user_id:
+            if scope == "global" or not group_id:
+                ud = self.usage.user_global_detail(user_id)
+            else:
+                ud = self.usage.user_detail(group_id, user_id)
+            cost_parts.append(f"你 ¥{self._cost(ud):.2f}")
+        if cost_parts:
+            lines.append("折合（估算）：" + " / ".join(cost_parts))
         yield event.plain_result("\n".join(lines))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
