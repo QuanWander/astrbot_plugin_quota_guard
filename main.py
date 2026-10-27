@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import json
-import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -328,7 +327,7 @@ class VipStore:
     "1.0.3",
     "大肥鱼",
     "群聊 token 额度控制 + 限时 VIP",
-    "1.2.1",
+    "1.2.2",
 )
 class TokenGuard(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -596,6 +595,23 @@ class TokenGuard(Star):
             return
         group_id = str(event.get_group_id() or "")
         user_id = str(event.get_sender_id() or "")
+        # 戳一戳等 notice 事件：发送者不一定等于 event.sender，优先取原始报文里的 user_id
+        try:
+            raw = getattr(event.message_obj, "raw_message", None)
+            if isinstance(raw, dict) and raw.get("post_type") == "notice":
+                user_id = str(raw.get("user_id") or user_id)
+                group_id = str(raw.get("group_id") or group_id)
+        except Exception:
+            pass
+        self_id = ""
+        try:
+            self_id = str(event.get_self_id() or "")
+        except Exception:
+            self_id = ""
+        # 机器人自己产生的不记账
+        if user_id and self_id and user_id == self_id:
+            return
+        logger.info("[quota] 记账 gid=%s uid=%s tokens=%s", group_id, user_id, tokens)
         # 私聊默认既不拦截也不计数，避免私聊消耗影响群额度
         if not group_id and not self._cfg("apply_private", False):
             return
